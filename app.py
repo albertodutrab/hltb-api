@@ -4,15 +4,10 @@ import re
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────
-
-HLTB_URL = "https://howlongtobeat.com/api/search"
+BASE_URL = "https://howlongtobeat.com"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
-    "Content-Type": "application/json",
     "Referer": "https://howlongtobeat.com/",
     "Origin": "https://howlongtobeat.com"
 }
@@ -23,11 +18,12 @@ BLOCKED_TERMS = [
     "skin"
 ]
 
-# ─────────────────────────────────────────────────────────────
-# TEXT NORMALIZATION
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# NORMALIZE
+# ─────────────────────────────────────────────
 
 def normalize(text):
+
     if not text:
         return ""
 
@@ -38,11 +34,12 @@ def normalize(text):
 
     return text
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # BLOCK FILTER
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 
 def is_blocked(title):
+
     title = normalize(title)
 
     for term in BLOCKED_TERMS:
@@ -51,11 +48,12 @@ def is_blocked(title):
 
     return False
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # LEVENSHTEIN
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 
 def levenshtein(s1, s2):
+
     s1 = normalize(s1)
     s2 = normalize(s2)
 
@@ -68,9 +66,11 @@ def levenshtein(s1, s2):
     previous_row = list(range(len(s2) + 1))
 
     for i, c1 in enumerate(s1):
+
         current_row = [i + 1]
 
         for j, c2 in enumerate(s2):
+
             insertions = previous_row[j + 1] + 1
             deletions = current_row[j] + 1
             substitutions = previous_row[j] + (c1 != c2)
@@ -83,11 +83,12 @@ def levenshtein(s1, s2):
 
     return previous_row[-1]
 
-# ─────────────────────────────────────────────────────────────
-# SIMILARITY SCORE
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# SIMILARITY
+# ─────────────────────────────────────────────
 
 def similarity_score(query, candidate):
+
     query = normalize(query)
     candidate = normalize(candidate)
 
@@ -100,11 +101,48 @@ def similarity_score(query, candidate):
 
     return 1 - (distance / max_len)
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# GET TOKEN
+# ─────────────────────────────────────────────
+
+def get_token():
+
+    response = requests.get(
+        f"{BASE_URL}/api/find/init",
+        headers=HEADERS,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    return {
+        "token": data["token"],
+        "hp_key": data["hpKey"],
+        "hp_value": data["hpVal"]
+    }
+
+# ─────────────────────────────────────────────
 # SEARCH HLTB
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 
 def search_hltb(game_name):
+
+    auth = get_token()
+
+    token = auth["token"]
+    hp_key = auth["hp_key"]
+    hp_value = auth["hp_value"]
+
+    headers = HEADERS.copy()
+
+    headers.update({
+        "x-auth-token": token,
+        "x-hp-key": hp_key,
+        "x-hp-val": hp_value,
+        "Content-Type": "application/json"
+    })
 
     payload = {
         "searchType": "games",
@@ -126,10 +164,6 @@ def search_hltb(game_name):
                     "flow": "",
                     "genre": ""
                 },
-                "rangeYear": {
-                    "min": "",
-                    "max": ""
-                },
                 "modifier": ""
             },
             "users": {
@@ -141,13 +175,15 @@ def search_hltb(game_name):
             "filter": "",
             "sort": 0,
             "randomizer": 0
-        }
+        },
+
+        hp_key: hp_value
     }
 
     response = requests.post(
-        HLTB_URL,
+        f"{BASE_URL}/api/find",
         json=payload,
-        headers=HEADERS,
+        headers=headers,
         timeout=30
     )
 
@@ -157,9 +193,9 @@ def search_hltb(game_name):
 
     return data.get("data", [])
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # BEST MATCH
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 
 def choose_best_match(query, results):
 
@@ -167,20 +203,28 @@ def choose_best_match(query, results):
 
     for r in results:
 
-        name = r.get("game_name")
+        try:
 
-        if not name:
+            name = r.get("game_name")
+
+            if not name:
+                continue
+
+            if is_blocked(name):
+                continue
+
+            if r.get("game_type") != "game":
+                continue
+
+            score = similarity_score(query, name)
+
+            valid.append({
+                "score": score,
+                "data": r
+            })
+
+        except Exception:
             continue
-
-        if is_blocked(name):
-            continue
-
-        score = similarity_score(query, name)
-
-        valid.append({
-            "score": score,
-            "data": r
-        })
 
     if not valid:
         return None
@@ -192,20 +236,21 @@ def choose_best_match(query, results):
 
     return valid[0]
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # HOME
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 
 @app.route("/")
 def home():
+
     return jsonify({
         "status": "ok",
         "message": "HLTB API server running"
     })
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # MAIN ENDPOINT
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 
 @app.route("/hltb")
 def hltb():
@@ -231,7 +276,7 @@ def hltb():
 
         if not best:
             return jsonify({
-                "error": "Nenhum resultado válido",
+                "error": "Nenhum resultado válido encontrado",
                 "query": game
             }), 404
 
@@ -253,19 +298,14 @@ def hltb():
             "error": str(e)
         }), 500
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # DEBUG ENDPOINT
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 
 @app.route("/hltb/all")
 def hltb_all():
 
     game = request.args.get("game")
-
-    if not game:
-        return jsonify({
-            "error": "Parâmetro game obrigatório"
-        }), 400
 
     try:
 
@@ -282,11 +322,14 @@ def hltb_all():
 
             output.append({
                 "game_name": name,
+                "game_type": r.get("game_type"),
                 "blocked": is_blocked(name),
+
                 "similarity_score": round(
                     similarity_score(game, name),
                     3
                 ),
+
                 "main_story": r.get("comp_main"),
                 "main_extras": r.get("comp_plus"),
                 "completionist": r.get("comp_100")
@@ -308,7 +351,7 @@ def hltb_all():
             "error": str(e)
         }), 500
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     app.run(debug=True)
