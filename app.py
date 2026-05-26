@@ -118,64 +118,56 @@ def search_hltb(game):
 
     response.raise_for_status()
 
-    soup = BeautifulSoup(response.text, "lxml")
+    html = response.text
 
-    cards = soup.select(".GameCard_search_list__IuP7A")
+    soup = BeautifulSoup(html, "html.parser")
 
     results = []
 
-    for card in cards:
+    # procura TODOS os links de jogos
+    game_links = soup.find_all("a", href=True)
 
-        try:
+    for link in game_links:
 
-            title_el = card.select_one("h2")
+        href = link.get("href", "")
 
-            if not title_el:
-                continue
+        if "/game/" not in href:
+            continue
 
-            title = title_el.text.strip()
+        title = link.get_text(strip=True)
 
-            if is_blocked(title):
-                continue
+        if not title:
+            continue
 
-            times = card.select(".GameCard_search_list_tidbit__yJZWT")
+        if is_blocked(title):
+            continue
 
-            parsed = {
-                "game_name": title,
-                "main_story": None,
-                "main_extras": None,
-                "completionist": None
-            }
+        parent_text = link.parent.get_text(" ", strip=True)
 
-            for t in times:
+        def extract_time(label):
 
-                label = t.text.lower()
+            pattern = rf"{label}\s+([0-9½¼¾\.]+ Hours?)"
 
-                strong = t.find_next("strong")
-
-                if not strong:
-                    continue
-
-                value = strong.text.strip()
-
-                if "main story" in label:
-                    parsed["main_story"] = value
-
-                elif "main + extras" in label:
-                    parsed["main_extras"] = value
-
-                elif "completionist" in label:
-                    parsed["completionist"] = value
-
-            parsed["score"] = similarity_score(
-                game,
-                title
+            match = re.search(
+                pattern,
+                parent_text,
+                re.IGNORECASE
             )
 
-            results.append(parsed)
+            if match:
+                return match.group(1)
 
-        except Exception:
-            continue
+            return None
+
+        parsed = {
+            "game_name": title,
+            "main_story": extract_time("Main Story"),
+            "main_extras": extract_time("Main + Extras"),
+            "completionist": extract_time("Completionist"),
+            "score": similarity_score(game, title)
+        }
+
+        results.append(parsed)
 
     results.sort(
         key=lambda x: x["score"],
