@@ -4,6 +4,10 @@ import re
 
 app = Flask(__name__)
 
+# ─────────────────────────────────────────────
+# TERMOS BLOQUEADOS
+# ─────────────────────────────────────────────
+
 BLOCKED_TERMS = [
     "dlc",
     "bundle",
@@ -11,7 +15,7 @@ BLOCKED_TERMS = [
 ]
 
 # ─────────────────────────────────────────────
-# NORMALIZE
+# NORMALIZAÇÃO
 # ─────────────────────────────────────────────
 
 def normalize(text):
@@ -19,7 +23,7 @@ def normalize(text):
     if not text:
         return ""
 
-    text = text.lower().strip()
+    text = str(text).lower().strip()
 
     text = re.sub(r'[^a-z0-9 ]', '', text)
     text = re.sub(r'\s+', ' ', text)
@@ -27,7 +31,7 @@ def normalize(text):
     return text
 
 # ─────────────────────────────────────────────
-# BLOCK FILTER
+# FILTRO DE DLC/BUNDLE/SKIN
 # ─────────────────────────────────────────────
 
 def is_blocked(title):
@@ -35,6 +39,7 @@ def is_blocked(title):
     title = normalize(title)
 
     for term in BLOCKED_TERMS:
+
         if term in title:
             return True
 
@@ -76,7 +81,7 @@ def levenshtein(s1, s2):
     return previous_row[-1]
 
 # ─────────────────────────────────────────────
-# SIMILARITY
+# SIMILARIDADE
 # ─────────────────────────────────────────────
 
 def similarity_score(query, candidate):
@@ -94,7 +99,7 @@ def similarity_score(query, candidate):
     return 1 - (distance / max_len)
 
 # ─────────────────────────────────────────────
-# CHOOSE BEST MATCH
+# ESCOLHE MELHOR RESULTADO
 # ─────────────────────────────────────────────
 
 def choose_best_match(query, results):
@@ -146,7 +151,7 @@ def home():
     })
 
 # ─────────────────────────────────────────────
-# MAIN ENDPOINT
+# ENDPOINT PRINCIPAL
 # ─────────────────────────────────────────────
 
 @app.route("/hltb")
@@ -155,30 +160,73 @@ def hltb():
     game = request.args.get("game")
 
     if not game:
+
         return jsonify({
-            "error": "Parâmetro game obrigatório"
+            "error": "Parâmetro 'game' obrigatório"
         }), 400
 
-try:
-
     try:
-        results = HowLongToBeat().search(game) or []
 
-    except Exception as internal_error:
+        # ─────────────────────────────────────
+        # BUSCA HLTB
+        # ─────────────────────────────────────
 
-        return jsonify({
-            "error": f"Erro interno HLTB: {str(internal_error)}"
-        }), 500
+        try:
 
-    if not results:
-        return jsonify({
-            "error": "Nenhum resultado encontrado",
-            "query": game
-        }), 404
+            results = HowLongToBeat().search(game) or []
 
-    best = choose_best_match(game, results)
+        except Exception as internal_error:
+
+            return jsonify({
+                "error": f"Erro interno HLTB: {str(internal_error)}"
+            }), 500
+
+        # ─────────────────────────────────────
+        # LIMPA RESULTADOS QUEBRADOS
+        # ─────────────────────────────────────
+
+        clean_results = []
+
+        for r in results:
+
+            try:
+
+                game_name = getattr(r, "game_name", None)
+
+                if not game_name:
+                    continue
+
+                game_name = str(game_name)
+
+                if is_blocked(game_name):
+                    continue
+
+                clean_results.append(r)
+
+            except Exception:
+                continue
+
+        results = clean_results
+
+        # ─────────────────────────────────────
+        # SEM RESULTADOS
+        # ─────────────────────────────────────
+
+        if not results:
+
+            return jsonify({
+                "error": "Nenhum resultado encontrado",
+                "query": game
+            }), 404
+
+        # ─────────────────────────────────────
+        # MELHOR MATCH
+        # ─────────────────────────────────────
+
+        best = choose_best_match(game, results)
 
         if not best:
+
             return jsonify({
                 "error": "Nenhum resultado válido encontrado",
                 "query": game
@@ -186,14 +234,93 @@ try:
 
         data = best["data"]
 
+        # ─────────────────────────────────────
+        # RETORNO
+        # ─────────────────────────────────────
+
         return jsonify({
+
             "query": game,
-            "matched_game": data.game_name,
+
+            "matched_game": getattr(data, "game_name", None),
+
             "similarity_score": round(best["score"], 3),
 
-            "main_story": data.main_story,
-            "main_extras": data.main_extra,
-            "completionist": data.completionist
+            "main_story": getattr(data, "main_story", None),
+
+            "main_extras": getattr(data, "main_extra", None),
+
+            "completionist": getattr(data, "completionist", None)
+
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+# ─────────────────────────────────────────────
+# DEBUG
+# ─────────────────────────────────────────────
+
+@app.route("/hltb/all")
+def hltb_all():
+
+    game = request.args.get("game")
+
+    if not game:
+
+        return jsonify({
+            "error": "Parâmetro 'game' obrigatório"
+        }), 400
+
+    try:
+
+        try:
+
+            results = HowLongToBeat().search(game) or []
+
+        except Exception as internal_error:
+
+            return jsonify({
+                "error": f"Erro interno HLTB: {str(internal_error)}"
+            }), 500
+
+        parsed = []
+
+        for r in results:
+
+            try:
+
+                parsed.append({
+
+                    "game_name": getattr(r, "game_name", None),
+
+                    "main_story": getattr(r, "main_story", None),
+
+                    "main_extras": getattr(r, "main_extra", None),
+
+                    "completionist": getattr(r, "completionist", None),
+
+                    "score": similarity_score(
+                        game,
+                        getattr(r, "game_name", "")
+                    )
+
+                })
+
+            except Exception:
+                continue
+
+        parsed.sort(
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
+        return jsonify({
+            "query": game,
+            "results": parsed
         })
 
     except Exception as e:
