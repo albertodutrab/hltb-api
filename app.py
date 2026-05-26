@@ -1,12 +1,21 @@
 from flask import Flask, request, jsonify
-from howlongtobeatpy import HowLongToBeat
+import requests
 import re
 
 app = Flask(__name__)
 
 # ─────────────────────────────────────────────────────────────
-# Termos proibidos
+# CONFIG
 # ─────────────────────────────────────────────────────────────
+
+HLTB_URL = "https://howlongtobeat.com/api/search"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Content-Type": "application/json",
+    "Referer": "https://howlongtobeat.com/",
+    "Origin": "https://howlongtobeat.com"
+}
 
 BLOCKED_TERMS = [
     "dlc",
@@ -15,7 +24,7 @@ BLOCKED_TERMS = [
 ]
 
 # ─────────────────────────────────────────────────────────────
-# Limpeza de texto
+# TEXT NORMALIZATION
 # ─────────────────────────────────────────────────────────────
 
 def normalize(text):
@@ -24,31 +33,26 @@ def normalize(text):
 
     text = text.lower().strip()
 
-    # remove caracteres especiais
     text = re.sub(r'[^a-z0-9 ]', '', text)
-
-    # remove espaços duplicados
     text = re.sub(r'\s+', ' ', text)
 
     return text
 
-
 # ─────────────────────────────────────────────────────────────
-# Verificar se deve excluir
+# BLOCK FILTER
 # ─────────────────────────────────────────────────────────────
 
 def is_blocked(title):
-    normalized = normalize(title)
+    title = normalize(title)
 
     for term in BLOCKED_TERMS:
-        if term in normalized:
+        if term in title:
             return True
 
     return False
 
-
 # ─────────────────────────────────────────────────────────────
-# Distância Levenshtein
+# LEVENSHTEIN
 # ─────────────────────────────────────────────────────────────
 
 def levenshtein(s1, s2):
@@ -79,9 +83,8 @@ def levenshtein(s1, s2):
 
     return previous_row[-1]
 
-
 # ─────────────────────────────────────────────────────────────
-# Similaridade
+# SIMILARITY SCORE
 # ─────────────────────────────────────────────────────────────
 
 def similarity_score(query, candidate):
@@ -97,46 +100,100 @@ def similarity_score(query, candidate):
 
     return 1 - (distance / max_len)
 
+# ─────────────────────────────────────────────────────────────
+# SEARCH HLTB
+# ─────────────────────────────────────────────────────────────
+
+def search_hltb(game_name):
+
+    payload = {
+        "searchType": "games",
+        "searchTerms": game_name.split(),
+        "searchPage": 1,
+        "size": 20,
+        "searchOptions": {
+            "games": {
+                "userId": 0,
+                "platform": "",
+                "sortCategory": "popular",
+                "rangeCategory": "main",
+                "rangeTime": {
+                    "min": 0,
+                    "max": 0
+                },
+                "gameplay": {
+                    "perspective": "",
+                    "flow": "",
+                    "genre": ""
+                },
+                "rangeYear": {
+                    "min": "",
+                    "max": ""
+                },
+                "modifier": ""
+            },
+            "users": {
+                "sortCategory": "postcount"
+            },
+            "lists": {
+                "sortCategory": "follows"
+            },
+            "filter": "",
+            "sort": 0,
+            "randomizer": 0
+        }
+    }
+
+    response = requests.post(
+        HLTB_URL,
+        json=payload,
+        headers=HEADERS,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    return data.get("data", [])
 
 # ─────────────────────────────────────────────────────────────
-# Escolher melhor resultado
+# BEST MATCH
 # ─────────────────────────────────────────────────────────────
 
 def choose_best_match(query, results):
-    valid_results = []
+
+    valid = []
 
     for r in results:
-        try:
-            if not r or not r.game_name:
-                continue
 
-            # Ignora DLCs, bundles e skins
-            if is_blocked(r.game_name):
-                continue
+        name = r.get("game_name")
 
-            score = similarity_score(query, r.game_name)
-
-            valid_results.append({
-                "obj": r,
-                "score": score
-            })
-
-        except Exception:
+        if not name:
             continue
 
-    if not valid_results:
+        if is_blocked(name):
+            continue
+
+        score = similarity_score(query, name)
+
+        valid.append({
+            "score": score,
+            "data": r
+        })
+
+    if not valid:
         return None
 
-    valid_results.sort(
+    valid.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    return valid_results[0]
-
+    return valid[0]
 
 # ─────────────────────────────────────────────────────────────
-# Home
+# HOME
 # ─────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -146,22 +203,23 @@ def home():
         "message": "HLTB API server running"
     })
 
-
 # ─────────────────────────────────────────────────────────────
-# Melhor resultado
+# MAIN ENDPOINT
 # ─────────────────────────────────────────────────────────────
 
 @app.route("/hltb")
 def hltb():
+
     game = request.args.get("game")
 
     if not game:
         return jsonify({
-            "error": "Parâmetro 'game' é obrigatório"
+            "error": "Parâmetro game obrigatório"
         }), 400
 
     try:
-        results = HowLongToBeat().search(game)
+
+        results = search_hltb(game)
 
         if not results:
             return jsonify({
@@ -173,73 +231,66 @@ def hltb():
 
         if not best:
             return jsonify({
-                "error": "Nenhum resultado válido encontrado",
+                "error": "Nenhum resultado válido",
                 "query": game
             }), 404
 
-        game_data = best["obj"]
+        data = best["data"]
 
         return jsonify({
             "query": game,
-            "matched_game": game_data.game_name,
+            "matched_game": data.get("game_name"),
             "similarity_score": round(best["score"], 3),
 
-            "main_story": game_data.main_story,
-            "main_extras": game_data.main_extra,
-            "completionist": game_data.completionist
+            "main_story": data.get("comp_main"),
+            "main_extras": data.get("comp_plus"),
+            "completionist": data.get("comp_100")
         })
 
     except Exception as e:
+
         return jsonify({
             "error": str(e)
         }), 500
 
-
 # ─────────────────────────────────────────────────────────────
-# Debug - listar candidatos
+# DEBUG ENDPOINT
 # ─────────────────────────────────────────────────────────────
 
 @app.route("/hltb/all")
 def hltb_all():
+
     game = request.args.get("game")
 
     if not game:
         return jsonify({
-            "error": "Parâmetro 'game' é obrigatório"
+            "error": "Parâmetro game obrigatório"
         }), 400
 
     try:
-        results = HowLongToBeat().search(game)
 
-        if not results:
-            return jsonify({
-                "error": "Nenhum resultado encontrado",
-                "query": game
-            }), 404
+        results = search_hltb(game)
 
         output = []
 
         for r in results:
-            try:
-                if not r or not r.game_name:
-                    continue
 
-                blocked = is_blocked(r.game_name)
+            name = r.get("game_name")
 
-                output.append({
-                    "game_name": r.game_name,
-                    "blocked": blocked,
-                    "similarity_score": round(
-                        similarity_score(game, r.game_name),
-                        3
-                    ),
-                    "main_story": r.main_story,
-                    "main_extras": r.main_extra,
-                    "completionist": r.completionist
-                })
-
-            except Exception:
+            if not name:
                 continue
+
+            output.append({
+                "game_name": name,
+                "blocked": is_blocked(name),
+                "similarity_score": round(
+                    similarity_score(game, name),
+                    3
+                ),
+                "main_story": r.get("comp_main"),
+                "main_extras": r.get("comp_plus"),
+                "completionist": r.get("comp_100")
+            })
 
         output.sort(
             key=lambda x: x["similarity_score"],
@@ -252,10 +303,10 @@ def hltb_all():
         })
 
     except Exception as e:
+
         return jsonify({
             "error": str(e)
         }), 500
-
 
 # ─────────────────────────────────────────────────────────────
 
