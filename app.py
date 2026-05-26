@@ -159,17 +159,24 @@ def hltb():
             "error": "Parâmetro game obrigatório"
         }), 400
 
+try:
+
     try:
+        results = HowLongToBeat().search(game) or []
 
-        results = HowLongToBeat().search(game)
+    except Exception as internal_error:
 
-        if not results:
-            return jsonify({
-                "error": "Nenhum resultado encontrado",
-                "query": game
-            }), 404
+        return jsonify({
+            "error": f"Erro interno HLTB: {str(internal_error)}"
+        }), 500
 
-        best = choose_best_match(game, results)
+    if not results:
+        return jsonify({
+            "error": "Nenhum resultado encontrado",
+            "query": game
+        }), 404
+
+    best = choose_best_match(game, results)
 
         if not best:
             return jsonify({
