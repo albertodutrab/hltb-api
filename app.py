@@ -1,17 +1,8 @@
 from flask import Flask, request, jsonify
-from bs4 import BeautifulSoup
-import requests
+from howlongtobeatpy import HowLongToBeat
 import re
 
 app = Flask(__name__)
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0 Safari/537.36"
-    )
-}
 
 BLOCKED_TERMS = [
     "dlc",
@@ -103,78 +94,44 @@ def similarity_score(query, candidate):
     return 1 - (distance / max_len)
 
 # ─────────────────────────────────────────────
-# SEARCH HLTB
+# CHOOSE BEST MATCH
 # ─────────────────────────────────────────────
 
-def search_hltb(game):
+def choose_best_match(query, results):
 
-    url = f"https://howlongtobeat.com/?q={game}"
+    valid = []
 
-    response = requests.get(
-        url,
-        headers=HEADERS,
-        timeout=30
-    )
+    for r in results:
 
-    response.raise_for_status()
+        try:
 
-    html = response.text
+            name = getattr(r, "game_name", None)
 
-    soup = BeautifulSoup(html, "html.parser")
+            if not name:
+                continue
 
-    results = []
+            if is_blocked(name):
+                continue
 
-    # procura TODOS os links de jogos
-    game_links = soup.find_all("a", href=True)
+            score = similarity_score(query, name)
 
-    for link in game_links:
+            valid.append({
+                "score": score,
+                "data": r
+            })
 
-        href = link.get("href", "")
-
-        if "/game/" not in href:
+        except Exception:
             continue
 
-        title = link.get_text(strip=True)
+    if not valid:
+        return None
 
-        if not title:
-            continue
-
-        if is_blocked(title):
-            continue
-
-        parent_text = link.parent.get_text(" ", strip=True)
-
-        def extract_time(label):
-
-            pattern = rf"{label}\s+([0-9½¼¾\.]+ Hours?)"
-
-            match = re.search(
-                pattern,
-                parent_text,
-                re.IGNORECASE
-            )
-
-            if match:
-                return match.group(1)
-
-            return None
-
-        parsed = {
-            "game_name": title,
-            "main_story": extract_time("Main Story"),
-            "main_extras": extract_time("Main + Extras"),
-            "completionist": extract_time("Completionist"),
-            "score": similarity_score(game, title)
-        }
-
-        results.append(parsed)
-
-    results.sort(
+    valid.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    return results
+    return valid[0]
 
 # ─────────────────────────────────────────────
 # HOME
@@ -204,7 +161,7 @@ def hltb():
 
     try:
 
-        results = search_hltb(game)
+        results = HowLongToBeat().search(game)
 
         if not results:
             return jsonify({
@@ -212,32 +169,24 @@ def hltb():
                 "query": game
             }), 404
 
-        best = results[0]
+        best = choose_best_match(game, results)
 
-        return jsonify(best)
+        if not best:
+            return jsonify({
+                "error": "Nenhum resultado válido encontrado",
+                "query": game
+            }), 404
 
-    except Exception as e:
-
-        return jsonify({
-            "error": str(e)
-        }), 500
-
-# ─────────────────────────────────────────────
-# DEBUG
-# ─────────────────────────────────────────────
-
-@app.route("/hltb/all")
-def hltb_all():
-
-    game = request.args.get("game")
-
-    try:
-
-        results = search_hltb(game)
+        data = best["data"]
 
         return jsonify({
             "query": game,
-            "results": results
+            "matched_game": data.game_name,
+            "similarity_score": round(best["score"], 3),
+
+            "main_story": data.main_story,
+            "main_extras": data.main_extra,
+            "completionist": data.completionist
         })
 
     except Exception as e:
