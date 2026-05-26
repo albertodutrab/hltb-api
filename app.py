@@ -1,15 +1,16 @@
 from flask import Flask, request, jsonify
+from bs4 import BeautifulSoup
 import requests
 import re
 
 app = Flask(__name__)
 
-BASE_URL = "https://howlongtobeat.com"
-
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Referer": "https://howlongtobeat.com/",
-    "Origin": "https://howlongtobeat.com"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    )
 }
 
 BLOCKED_TERMS = [
@@ -102,139 +103,86 @@ def similarity_score(query, candidate):
     return 1 - (distance / max_len)
 
 # ─────────────────────────────────────────────
-# GET TOKEN
+# SEARCH HLTB
 # ─────────────────────────────────────────────
 
-def get_token():
+def search_hltb(game):
+
+    url = f"https://howlongtobeat.com/?q={game}"
 
     response = requests.get(
-        f"{BASE_URL}/api/find/init",
+        url,
         headers=HEADERS,
         timeout=30
     )
 
     response.raise_for_status()
 
-    data = response.json()
+    soup = BeautifulSoup(response.text, "lxml")
 
-    return {
-        "token": data["token"],
-        "hp_key": data["hpKey"],
-        "hp_value": data["hpVal"]
-    }
+    cards = soup.select(".GameCard_search_list__IuP7A")
 
-# ─────────────────────────────────────────────
-# SEARCH HLTB
-# ─────────────────────────────────────────────
+    results = []
 
-def search_hltb(game_name):
-
-    auth = get_token()
-
-    token = auth["token"]
-    hp_key = auth["hp_key"]
-    hp_value = auth["hp_value"]
-
-    headers = HEADERS.copy()
-
-    headers.update({
-        "x-auth-token": token,
-        "x-hp-key": hp_key,
-        "x-hp-val": hp_value,
-        "Content-Type": "application/json"
-    })
-
-    payload = {
-        "searchType": "games",
-        "searchTerms": game_name.split(),
-        "searchPage": 1,
-        "size": 20,
-        "searchOptions": {
-            "games": {
-                "userId": 0,
-                "platform": "",
-                "sortCategory": "popular",
-                "rangeCategory": "main",
-                "rangeTime": {
-                    "min": 0,
-                    "max": 0
-                },
-                "gameplay": {
-                    "perspective": "",
-                    "flow": "",
-                    "genre": ""
-                },
-                "modifier": ""
-            },
-            "users": {
-                "sortCategory": "postcount"
-            },
-            "lists": {
-                "sortCategory": "follows"
-            },
-            "filter": "",
-            "sort": 0,
-            "randomizer": 0
-        },
-
-        hp_key: hp_value
-    }
-
-    response = requests.post(
-        f"{BASE_URL}/api/find",
-        json=payload,
-        headers=headers,
-        timeout=30
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    return data.get("data", [])
-
-# ─────────────────────────────────────────────
-# BEST MATCH
-# ─────────────────────────────────────────────
-
-def choose_best_match(query, results):
-
-    valid = []
-
-    for r in results:
+    for card in cards:
 
         try:
 
-            name = r.get("game_name")
+            title_el = card.select_one("h2")
 
-            if not name:
+            if not title_el:
                 continue
 
-            if is_blocked(name):
+            title = title_el.text.strip()
+
+            if is_blocked(title):
                 continue
 
-            if r.get("game_type") != "game":
-                continue
+            times = card.select(".GameCard_search_list_tidbit__yJZWT")
 
-            score = similarity_score(query, name)
+            parsed = {
+                "game_name": title,
+                "main_story": None,
+                "main_extras": None,
+                "completionist": None
+            }
 
-            valid.append({
-                "score": score,
-                "data": r
-            })
+            for t in times:
+
+                label = t.text.lower()
+
+                strong = t.find_next("strong")
+
+                if not strong:
+                    continue
+
+                value = strong.text.strip()
+
+                if "main story" in label:
+                    parsed["main_story"] = value
+
+                elif "main + extras" in label:
+                    parsed["main_extras"] = value
+
+                elif "completionist" in label:
+                    parsed["completionist"] = value
+
+            parsed["score"] = similarity_score(
+                game,
+                title
+            )
+
+            results.append(parsed)
 
         except Exception:
             continue
 
-    if not valid:
-        return None
-
-    valid.sort(
+    results.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    return valid[0]
+    return results
 
 # ─────────────────────────────────────────────
 # HOME
@@ -272,25 +220,9 @@ def hltb():
                 "query": game
             }), 404
 
-        best = choose_best_match(game, results)
+        best = results[0]
 
-        if not best:
-            return jsonify({
-                "error": "Nenhum resultado válido encontrado",
-                "query": game
-            }), 404
-
-        data = best["data"]
-
-        return jsonify({
-            "query": game,
-            "matched_game": data.get("game_name"),
-            "similarity_score": round(best["score"], 3),
-
-            "main_story": data.get("comp_main"),
-            "main_extras": data.get("comp_plus"),
-            "completionist": data.get("comp_100")
-        })
+        return jsonify(best)
 
     except Exception as e:
 
@@ -299,7 +231,7 @@ def hltb():
         }), 500
 
 # ─────────────────────────────────────────────
-# DEBUG ENDPOINT
+# DEBUG
 # ─────────────────────────────────────────────
 
 @app.route("/hltb/all")
@@ -311,38 +243,9 @@ def hltb_all():
 
         results = search_hltb(game)
 
-        output = []
-
-        for r in results:
-
-            name = r.get("game_name")
-
-            if not name:
-                continue
-
-            output.append({
-                "game_name": name,
-                "game_type": r.get("game_type"),
-                "blocked": is_blocked(name),
-
-                "similarity_score": round(
-                    similarity_score(game, name),
-                    3
-                ),
-
-                "main_story": r.get("comp_main"),
-                "main_extras": r.get("comp_plus"),
-                "completionist": r.get("comp_100")
-            })
-
-        output.sort(
-            key=lambda x: x["similarity_score"],
-            reverse=True
-        )
-
         return jsonify({
             "query": game,
-            "results": output
+            "results": results
         })
 
     except Exception as e:
